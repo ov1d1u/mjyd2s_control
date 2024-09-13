@@ -7,6 +7,8 @@ import argparse
 from Crypto.Cipher import AES
 from bleak import BleakClient, BleakScanner
 
+from mjyd2sconfiguration import MJYD2SConfiguration
+
 LOGGER = logging.getLogger(__name__)
 
 CHAR_10_UUID = "00000010-0000-1000-8000-00805f9b34fb"
@@ -18,35 +20,16 @@ CHAR_RX_UUID = "00000102-0065-6C62-2E74-6F696D2E696D"
 DISCOVERY_TIMEOUT = 30.0
 REPLY_TIMEOUT = 5.0
 
-class MJYD2SConfiguration:
-    def __init__(self, configuration_bytes):
-        if len(configuration_bytes) != 8:
-            raise ValueError("Invalid configuration bytes")
-        
-        self.is_on = bool(configuration_bytes[3])
-        self.brightness = configuration_bytes[4]
-        self.is_enabled = bool(configuration_bytes[5])
-        self.duration = configuration_bytes[6]
-        self.ambient_limit = configuration_bytes[7]
-        
-    def bytes(self):
-        byte_array = b"\x07\x03\x00"
-        byte_array += "\x01" if self.is_on else "\x00"
-        byte_array += bytes([self.brightness])
-        byte_array += "\x01" if self.is_enabled else "\x00"
-        byte_array += bytes([self.duration])
-        byte_array += bytes([self.ambient_limit])
-        return byte_array
 
 class MJYD2S:
-    queue_in = asyncio.Queue()
-    
     mi_token = None
     mi_random_key = secrets.token_bytes(16)
     mi_random_key_recv = None
     derived_key = None
-    msg_count = 0
     configuration = None
+
+    _queue_in = asyncio.Queue()
+    _msg_count = 0
     
     def __init__(self, device, mi_token):
         self.device = device
@@ -54,7 +37,7 @@ class MJYD2S:
     
     async def _notification_handler(self, sender, data):
         LOGGER.debug(f"<< {data.hex()}")
-        self.queue_in.put_nowait(data)
+        self._queue_in.put_nowait(data)
     
     async def connect(self) -> bool:
         self.client = BleakClient(self.device)
@@ -75,7 +58,7 @@ class MJYD2S:
         response = await self._get_response(decrypt=False)
         if response != bytes.fromhex("0000040006f2"):
             raise Exception(f"Invalid response received. received {response.hex()}")
-            
+        
         await self._write(CHAR_19_UUID, bytes.fromhex("0000050006f2"))
         mtu_response = await self._get_response(decrypt=False)
         mtu_response[2] = mtu_response[2] + 1
@@ -155,48 +138,42 @@ class MJYD2S:
     async def get_configuration(self) -> MJYD2SConfiguration | None:
         self._ensure_connected()
         
-        await self._send_message(bytes.fromhex("06010102030408"))
-        response = await self._get_response()
+        response = await self._send_message(bytes.fromhex("06010102030408"))
         self.configuration = MJYD2SConfiguration(response)
         return self.configuration
     
     async def turn_on(self, refresh_configuration: bool = True):
         self._ensure_connected()
         
-        await self._send_message(bytes.fromhex("03020301"))
-        await self._get_response()
+        await self._send_message(bytes.fromhex("03020301"), wait_for_reply=False)
         if refresh_configuration:
             await self.get_configuration()
     
     async def turn_off(self, refresh_configuration: bool = True):
         self._ensure_connected()
         
-        await self._send_message(bytes.fromhex("03020300"))
-        await self._get_response()
+        await self._send_message(bytes.fromhex("03020300"), wait_for_reply=False)
         if refresh_configuration:
             await self.get_configuration()
     
     async def set_brightness(self, brightness: int, refresh_configuration: bool = True):
         self._ensure_connected()
         
-        await self._send_message(bytes.fromhex(f"030202{brightness:02x}"))
-        await self._get_response()
+        await self._send_message(bytes.fromhex(f"030202{brightness:02x}"), wait_for_reply=False)
         if refresh_configuration:
             await self.get_configuration()
             
     async def set_duration(self, timeout: int, refresh_configuration: bool = True):
         self._ensure_connected()
         
-        await self._send_message(bytes.fromhex(f"030204{timeout:02x}"))
-        await self._get_response()
+        await self._send_message(bytes.fromhex(f"030204{timeout:02x}"), wait_for_reply=False)
         if refresh_configuration:
             await self.get_configuration()
             
     async def set_ambient(self, limit: int, refresh_configuration: bool = True):
         self._ensure_connected()
         
-        await self._send_message(bytes.fromhex(f"030208{limit:02x}"))
-        await self._get_response()
+        await self._send_message(bytes.fromhex(f"030208{limit:02x}"), wait_for_reply=False)
         if refresh_configuration:
             await self.get_configuration()
     
@@ -214,17 +191,33 @@ class MJYD2S:
         if not self.is_authenticated:
             raise Exception("Not authenticated")
             
-    async def _send_message(self, msg):
-        hex_msg_count = self.msg_count.to_bytes(2, byteorder='little').hex()
+    async def _send_message(self, msg, wait_for_reply=True):
+        hex_msg_count = self._msg_count.to_bytes(2, byteorder='little').hex()
         msg_bytes = bytes.fromhex(hex_msg_count) + self._encrypt_message(msg)
-        self.msg_count += 1
+        self._msg_count += 1
         await self._write(CHAR_TX_UUID, msg_bytes)
+
+        if not wait_for_reply:
+            return
+
+        return await self._get_response(expected_msg_count=self._msg_count)
+
+    async def _wait_response(self, expected_msg_count):
+        if expected_msg_count is not None:
+            while True:
+                in_msg = await self._queue_in.get()
+                in_msg_count = int.from_bytes(in_msg[0:2], byteorder='little')
+
+                if in_msg_count == expected_msg_count:
+                    return in_msg
+        else:
+            return await self._queue_in.get()
         
-    async def _get_response(self, decrypt: bool = True) -> bytes | None:
+    async def _get_response(self, expected_msg_count: int|None = None, decrypt: bool = True) -> bytes | None:
         try:
-            response = await asyncio.wait_for(self.queue_in.get(), timeout=REPLY_TIMEOUT)
+            response = await asyncio.wait_for(self._wait_response(expected_msg_count), timeout=REPLY_TIMEOUT)
+
             if decrypt:
-                self.msg_count = int.from_bytes(response[0:2], byteorder='little')
                 return self._decrypt_message(response)
             else:
                 return response
@@ -279,13 +272,13 @@ class MJYD2S:
     def _compute_enc_nonce(self):
         nonce = 12 * [0]
         nonce[:4] = self.derived_key[36:40]
-        nonce[8:12] = [self.msg_count, 0, 0, 0]
+        nonce[8:12] = [self._msg_count, 0, 0, 0]
         return bytes(nonce)
     
     def _compute_dec_nonce(self):
         nonce = 12 * [0]
         nonce[:4] = self.derived_key[32:36]
-        nonce[8:12] = [self.msg_count, 0, 0, 0]
+        nonce[8:12] = [self._msg_count, 0, 0, 0]
         return bytes(nonce)
 
 
@@ -304,7 +297,7 @@ async def run(args):
     )
     
     if ble_client is None:
-        print("Device not found")
+        LOGGER.error("Device not found")
         return
     
     mjyd2s = MJYD2S(ble_client, args.mi_token)
