@@ -272,13 +272,15 @@ class MJYD2S:
     def _compute_enc_nonce(self):
         nonce = 12 * [0]
         nonce[:4] = self.derived_key[36:40]
-        nonce[8:12] = [self._msg_count, 0, 0, 0]
+        nonce[8: 10] = self._msg_count.to_bytes(2, byteorder='little')
+        nonce[10:12] = [0, 0]
         return bytes(nonce)
     
     def _compute_dec_nonce(self):
         nonce = 12 * [0]
         nonce[:4] = self.derived_key[32:36]
-        nonce[8:12] = [self._msg_count, 0, 0, 0]
+        nonce[8:10] = self._msg_count.to_bytes(2, byteorder='little')
+        nonce[10:12] = [0, 0]
         return bytes(nonce)
 
 
