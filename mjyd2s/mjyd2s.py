@@ -101,7 +101,7 @@ class MJYD2S:
         ).digest()
         
         if mi_device_info_recv != expected_mi_device_info:
-            raise Exception(f"Fatal error: device info mismatch.")
+            raise Exception(f"Fatal error: device info mismatch. Received {mi_device_info_recv.hex()}, expected {expected_mi_device_info.hex()}")
         
         await self._write(CHAR_19_UUID, bytes.fromhex("00000300"))
         await self._write(CHAR_19_UUID, bytes.fromhex("0000000a0100"))
@@ -143,21 +143,21 @@ class MJYD2S:
     async def turn_on(self, refresh_configuration: bool = True):
         self._ensure_connected()
         
-        await self._send_message(bytes.fromhex("03020301"), wait_for_reply=False)
+        await self._send_message(bytes.fromhex("03020301"), wait_for_reply=True)
         if refresh_configuration:
             await self.get_configuration()
     
     async def turn_off(self, refresh_configuration: bool = True):
         self._ensure_connected()
         
-        await self._send_message(bytes.fromhex("03020300"), wait_for_reply=False)
+        await self._send_message(bytes.fromhex("03020300"), wait_for_reply=True)
         if refresh_configuration:
             await self.get_configuration()
     
     async def set_brightness(self, brightness: int, refresh_configuration: bool = True):
         self._ensure_connected()
         
-        await self._send_message(bytes.fromhex(f"030202{brightness:02x}"), wait_for_reply=False)
+        await self._send_message(bytes.fromhex(f"030202{brightness:02x}"), wait_for_reply=True)
         if refresh_configuration:
             await self.get_configuration()
             
